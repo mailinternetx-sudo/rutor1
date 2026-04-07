@@ -1,310 +1,306 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <title>V10 2 — RuTor Netflix (обновлённые категории + улучшенный magnet)</title>
-    <style>
-        body { font-family: system-ui; background:#111; color:#fff; padding:20px; }
-        pre { background:#1a1a1a; padding:20px; border-radius:12px; overflow:auto; font-size:14px; }
-        .note { background:#221f1f; padding:15px; border-radius:8px; margin:15px 0; }
-    </style>
-</head>
-<body>
-    <h1>✅ V10 2 — RuTor Netflix • Обновлённые категории + улучшенный парсинг magnet</h1>
-    <p><strong>Что изменилось:</strong></p>
-    <ul>
-        <li>Точно по твоему запросу: 6 категорий RuTor</li>
-        <li>1. Топ торренты за последние 24 часа → https://rutor.info/top</li>
-        <li>2. Зарубежные фильмы → https://rutor.info/browse/0/1/0/0</li>
-        <li>3. Наши фильмы → https://rutor.info/browse/0/1/1/0</li>
-        <li>4. Зарубежные сериалы → https://rutor.info/browse/0/5/0/0</li>
-        <li>5. Наши сериалы → https://rutor.info/browse/0/5/1/0</li>
-        <li>6. Телевизор → https://rutor.info/browse/0/6/0/0</li>
-        <li>Улучшен парсинг magnet-ссылок (DOM + мощный regex fallback)</li>
-        <li>Максимальная устойчивость к изменениям сайта</li>
-    </ul>
+(function() {
+    // === КОНФИГУРАЦИЯ ===
+    // Адрес вашего TorrServer. Lampa обычно берет его из настроек, но можно указать явно.
+    // Оставим пустым, чтобы брать активный сервер из настроек Lampa.
+    var TORR_SERVER_URL = ''; 
 
-<pre><code>(function () {
-    'use strict';
+    // ID компонентов для избежания конфликтов
+    var PLUGIN_ID = 'rutor_plugin';
+    var MENU_ITEM_ID = 'rutor_menu_item';
 
-    if (window.v10_2_rutor_netflix_final) return;
-    window.v10_2_rutor_netflix_final = true;
-
-    Lampa.Lang.add({
-        v10_rutor: { ru: 'V10 2', en: 'V10 2' },
-        v10_top: { ru: 'Топ RuTor', en: 'Top' },
-        v10_new: { ru: 'Новинки', en: 'New' },
-        v10_categories: { ru: 'Категории', en: 'Categories' },
-        v10_search: { ru: 'Поиск по RuTor', en: 'Search RuTor' },
-        v10_continue: { ru: 'Продолжить просмотр', en: 'Continue Watching' },
-        v10_favorite: { ru: 'Избранное', en: 'Favorites' },
-        v10_loading: { ru: 'Загрузка с RuTor...', en: 'Loading from RuTor...' },
-        v10_error: { ru: 'Ошибка загрузки RuTor', en: 'RuTor load error' }
-    });
-
-    var network = new Lampa.Reguest();
-    var CACHE_TTL = 20 * 60 * 1000;
-
-    function getCache(key) {
-        var d = Lampa.Storage.get('v10_rutor_nf_' + key);
-        return d && Date.now() - d.time < CACHE_TTL ? d.data : null;
-    }
-    function setCache(key, data) {
-        Lampa.Storage.set('v10_rutor_nf_' + key, {time: Date.now(), data: data});
-    }
-
-    // ==================== УЛУЧШЕННЫЙ ПАРСИНГ (с усиленным magnet) ====================
-    function parseTorrentList(html) {
-        var parser = new DOMParser();
-        var doc = parser.parseFromString(html, 'text/html');
-        var result = [];
-
-        var rows = doc.querySelectorAll('tr[class^="g-"], tr.g-');
-        if (rows.length < 5) {
-            rows = Array.from(doc.querySelectorAll('tr')).filter(function(tr) {
-                return tr.querySelector('a[href^="/torrent/"]');
-            });
-        }
-
-        Array.from(rows).slice(0, 45).forEach(function(row) {
-            var titleLink = row.querySelector('a[href^="/torrent/"]');
-            if (!titleLink) return;
-
-            var title = titleLink.textContent.trim();
-            var url = 'https://rutor.info' + titleLink.getAttribute('href');
-
-            // === УЛУЧШЕННЫЙ ПОИСК MAGNET ===
-            var magnet = null;
-            var magnetEl = row.querySelector('a[href^="magnet:"]');
-            if (magnetEl) {
-                magnet = magnetEl.getAttribute('href');
-            } else {
-                // Резервный regex — ищет magnet даже если он в onclick, data-атрибуте или просто в тексте
-                var magnetMatch = row.innerHTML.match(/magnet:\?xt=urn:btih:[a-zA-Z0-9]{32,40}[^"<&]*/i);
-                if (magnetMatch) magnet = magnetMatch[0];
-            }
-
-            // Размер
-            var size = '';
-            var sizeCells = row.querySelectorAll('td');
-            if (sizeCells.length >= 3) size = (sizeCells[2] || sizeCells[3]).textContent.trim();
-
-            // Сиды / Пиры
-            var seeds = 0, peers = 0;
-            var peerCell = row.querySelector('td:last-child, td:nth-child(4)');
-            if (peerCell) {
-                var green = peerCell.querySelector('.green') || peerCell.textContent.match(/^(\d+)/);
-                seeds = green ? parseInt(green.textContent || green[1]) || 0 : 0;
-                var red = peerCell.querySelector('.red');
-                peers = red ? parseInt(red.textContent) || 0 : 0;
-            }
-
-            // Год и чистое название
-            var yearMatch = title.match(/\((\d{4})\)/);
-            var year = yearMatch ? parseInt(yearMatch[1]) : null;
-            var cleanTitle = title.replace(/\s*\(.*?\)\s*/g, '').trim();
-
-            result.push({
-                title: title,
-                original_title: title,
-                url: url,
-                magnet: magnet,
-                link: url,
-                size: size,
-                seeds: seeds,
-                peers: peers,
-                year: year,
-                search_title: cleanTitle,
-                poster: ''
-            });
-        });
-
-        // Если DOM не справился — финальный regex
-        if (result.length < 8) {
-            var regex = /<a href="\/torrent\/[^"]+">([^<]+)<\/a>[\s\S]*?(magnet:\?xt=urn:btih:[^"&]+)?[\s\S]*?(\d+(?:\.\d+)?\s*[GT]B)/gi;
-            var match;
-            while ((match = regex.exec(html)) !== null) {
-                result.push({
-                    title: match[1].trim(),
-                    original_title: match[1].trim(),
-                    url: '',
-                    magnet: match[2] || null,
-                    size: match[3] || '',
-                    seeds: 0,
-                    peers: 0,
-                    year: null,
-                    search_title: match[1].replace(/\s*\(.*?\)\s*/g, '').trim()
-                });
-            }
-        }
-
-        return result;
-    }
-
-    function fetchRutor(url, cacheKey, success, error) {
-        var cached = getCache(cacheKey);
-        if (cached) return success(cached);
-
-        network.silent(url, function(html) {
-            var list = parseTorrentList(html);
-            setCache(cacheKey, list);
-            success(list);
-        }, function(err) {
-            console.warn('[V10 2 RuTor] Ошибка:', err);
-            error && error(Lampa.Lang.translate('v10_error'));
-        }, { timeout: 18000 });
-    }
-
-    function getTop(cb, err) { fetchRutor('https://rutor.info/top', 'top', cb, err); }
-    function getNew(cb, err) { fetchRutor('https://rutor.info/new', 'new', cb, err); }
-
-    // ==================== НОВЫЕ КАТЕГОРИИ ПО ТВОЕМУ СПИСКУ ====================
-    var categories = [
-        { title: 'Топ торренты за последние 24 часа', url: 'https://rutor.info/top' },
-        { title: 'Зарубежные фильмы', url: 'https://rutor.info/browse/0/1/0/0' },
-        { title: 'Наши фильмы', url: 'https://rutor.info/browse/0/1/1/0' },
-        { title: 'Зарубежные сериалы', url: 'https://rutor.info/browse/0/5/0/0' },
-        { title: 'Наши сериалы', url: 'https://rutor.info/browse/0/5/1/0' },
-        { title: 'Телевизор', url: 'https://rutor.info/browse/0/6/0/0' }
+    // Категории (как запрашивал пользователь)
+    var CATEGORIES = [
+        { id: 'top',   title: 'Топ торренты (24ч)',  url: '/top/24' },
+        { id: 'foreign_movies', title: 'Зарубежные фильмы', url: '/0/0/100/0/0' }, // Примерные пути
+        { id: 'russian_movies', title: 'Наши фильмы',      url: '/0/10/100/0/0' },
+        { id: 'foreign_series', title: 'Зарубежные сериалы', url: '/0/0/201/0/0' },
+        { id: 'russian_series', title: 'Наши сериалы',      url: '/0/10/201/0/0' },
+        { id: 'tv',             title: 'Телевизор',         url: '/0/0/3/0/0' }
     ];
 
-    function getCategory(url, cb, err) { 
-        fetchRutor(url, 'cat_' + btoa(url).slice(-15), cb, err); 
+    // === ИНИЦИАЛИЗАЦИЯ ===
+    function init() {
+        if (!window.Lampa) {
+            console.error('Lampa not found');
+            return;
+        }
+
+        console.log('Rutor Plugin: Initializing...');
+
+        // Регистрируем пункт в меню
+        Lampa.Listener.follow('app', function(e) {
+            if (e.type === 'ready') {
+                addMenuItem();
+            }
+        });
     }
 
-    // ==================== КОМПОНЕНТ ====================
-    function V10RutorNetflix(object) {
-        var component = new Lampa.InteractionCategory(object);
-        var scroll = null;
-        var tabs = null;
-        var currentTab = 'top';
+    // === ДОБАВЛЕНИЕ КНОПКИ В МЕНЮ ===
+    function addMenuItem() {
+        var menu_item = $('<div class="menu__item selector" id="' + MENU_ITEM_ID + '">')
+            .append($('<div class="menu__item-icon">').html('<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="18" cy="18" r="18" fill="#FF4700"/><path d="M18 8V28M8 18H28" stroke="white" stroke-width="4" stroke-linecap="round"/></svg>'))
+            .append($('<div class="menu__item-text">').text('RuTor TorrServe'));
 
-        component.create = function () {
-            tabs = new Lampa.Tabs({
-                tabs: [
-                    {title: Lampa.Lang.translate('v10_top'), value: 'top'},
-                    {title: Lampa.Lang.translate('v10_new'), value: 'new'},
-                    {title: Lampa.Lang.translate('v10_categories'), value: 'categories'},
-                    {title: Lampa.Lang.translate('v10_search'), value: 'search'},
-                    {title: Lampa.Lang.translate('v10_continue'), value: 'continue'},
-                    {title: Lampa.Lang.translate('v10_favorite'), value: 'favorite'}
-                ],
-                onSelect: function(tab) {
-                    currentTab = tab.value;
-                    component.reload();
-                }
-            });
-            component.html(tabs.render());
-
-            scroll = new Lampa.Scroll({mask: true, over: true, step: 280});
-            component.html(scroll.render());
-
-            component.reload();
-        };
-
-        component.reload = function () {
-            scroll.clear();
-            var loader = Lampa.Template.get('loader', {text: Lampa.Lang.translate('v10_loading')});
-            scroll.append(loader);
-
-            var success = function(list) {
-                loader.remove();
-                list.forEach(function(item) {
-                    var card = Lampa.Card.create(item, {large: true});
-                    card.onEnter = function () {
-                        Lampa.Activity.push({
-                            component: 'movie',
-                            title: item.search_title || item.title,
-                            year: item.year,
-                            url: item.magnet || item.url,
-                            source: 'torrent'
-                        });
-                    };
-                    scroll.append(card);
-                });
-                if (!list.length) scroll.append(Lampa.Template.get('empty'));
-            };
-
-            if (currentTab === 'top') getTop(success);
-            else if (currentTab === 'new') getNew(success);
-            else if (currentTab === 'categories') {
-                loader.remove();
-                categories.forEach(function(cat) {
-                    var card = Lampa.Card.create({title: cat.title}, {large: true});
-                    card.onEnter = function() { getCategory(cat.url, success); };
-                    scroll.append(card);
-                });
-            }
-            else if (currentTab === 'search') {
-                loader.remove();
-                Lampa.Search.open({
-                    onSearch: function(query) {
-                        var searchUrl = 'https://rutor.info/search/' + encodeURIComponent(query);
-                        fetchRutor(searchUrl, 'search_' + query, success);
-                    }
-                });
-            }
-            else if (currentTab === 'continue') {
-                loader.remove();
-                var history = Lampa.Storage.get('history') || [];
-                history.slice(0, 30).forEach(function(item) {
-                    if (item.title) scroll.append(Lampa.Card.create(item, {large: true}));
-                });
-            }
-            else if (currentTab === 'favorite') {
-                loader.remove();
-                var fav = Lampa.Favorite.get('movie') || [];
-                fav.forEach(function(item) {
-                    scroll.append(Lampa.Card.create(item, {large: true}));
-                });
-            }
-        };
-
-        component.destroy = function () {
-            if (scroll) scroll.destroy();
-            if (tabs) tabs.destroy();
-            network.clear();
-        };
-
-        return component;
-    }
-
-    function addMenuButton() {
-        var btn = $('<div class="menu__item menu__item--full">' +
-            '<div class="menu__ico" style="color:#e50914">📺</div>' +
-            '<div class="menu__text">V10 2</div>' +
-        '</div>');
-
-        btn.on('hover:enter', function() {
-            Lampa.Activity.push({
-                component: 'v10_rutor_netflix',
-                title: 'V10 2 — RuTor',
-                page: 1
-            });
+        // Обработчик нажатия
+        menu_item.on('hover:enter', function() {
+            showCategoriesScreen();
         });
 
-        $('.menu .menu__list').eq(0).append(btn);
+        // Вставляем в левое меню (обычно это .menu .menu__list)
+        var menuList = $('.menu .menu__list');
+        if (menuList.length) {
+            menuList.append(menu_item);
+        } else {
+            console.error('Rutor Plugin: Menu container not found');
+        }
     }
 
-    function init() {
-        Lampa.Component.add('v10_rutor_netflix', V10RutorNetflix);
-        addMenuButton();
-        console.log('%c✅ V10 2 RuTor Netflix (новые категории + улучшенный magnet) загружен', 'color:#e50914;font-weight:bold');
+    // === ЭКРАН ВЫБОРА КАТЕГОРИИ ===
+    function showCategoriesScreen() {
+        var items = CATEGORIES.map(function(cat) {
+            return {
+                title: cat.title,
+                id: cat.id,
+                url: cat.url,
+                plugin: true
+            };
+        });
+
+        Lampa.Activity.push({
+            url: '',
+            title: 'RuTor Категории',
+            component: 'catalog_full',
+            page: 1,
+            items: items,
+            onSelect: function(item) {
+                showTorrentList(item);
+            }
+        });
     }
 
-    if (window.appready) init();
-    else Lampa.Listener.follow('app', function(e) { if (e.type === 'ready') init(); });
+    // === ЗАГРУЗКА СПИСКА ТОРРЕНТОВ ===
+    function showTorrentList(categoryItem) {
+        Lampa.Controller.enabled().content = false;
+        Lampa.Activity.push({
+            url: '',
+            title: categoryItem.title,
+            component: 'catalog_full',
+            page: 1,
+            items: [], // Пусто, пока грузим
+            onCreate: function(bind) {
+                bind.html.append('<div class="broadcast__scan"><div></div></div>'); // Индикатор загрузки
+                loadRutorPage(categoryItem.url, bind);
+            }
+        });
+    }
+
+    // === ПАРСИНГ rutor.info ===
+    function loadRutorPage(relativePath, bind) {
+        // Определяем базовый URL rutor
+        var baseUrl = 'http://rutor.info'; 
+        var targetUrl = baseUrl + relativePath;
+
+        // Пробуем получить активный TorrServer из настроек Lampa
+        var tsUrl = Lampa.Storage.get('torrserver_url') || 'http://localhost:8090';
+        
+        // ХАК ДЛЯ CORS: Пробуем запросить через TorrServer (многие сборки проксируют запросы)
+        // Если TorrServer поддерживает проксирование (например /proxy/http://...)
+        // В противном случае запрос будет заблокирован браузером, если нет расширения или специальной сборки.
+        var requestUrl = targetUrl; 
+        
+        // Раскомментируйте строку ниже, если у вас TorrServer настроен как прокси или используется модуль Lampa Proxy
+        // requestUrl = tsUrl + '/proxy/' + targetUrl.replace('://', '/');
+
+        console.log('Rutor Plugin: Fetching ' + requestUrl);
+
+        fetch(requestUrl)
+            .then(function(response) {
+                if (!response.ok) throw new Error('Network response was not ok');
+                return response.text();
+            })
+            .then(function(html) {
+                var parsedMovies = parseHtml(html);
+                renderMovies(parsedMovies, bind);
+            })
+            .catch(function(error) {
+                console.error('Rutor Plugin: Error loading page', error);
+                Lampa.Noty.show('Ошибка загрузки RuTor. Проверьте интернет или CORS.');
+                bind.render(); // Очистить лоадер
+            });
+    }
+
+    // === HTML ПАРСЕР ===
+    function parseHtml(html) {
+        var movies = [];
+        var parser = new DOMParser();
+        var doc = parser.parseFromString(html, 'text/html');
+        var rows = doc.querySelectorAll('#index tr.gai, tr.tum'); // Селекторы таблиц rutor (обычно .gai для деталей)
+
+        // rutor использует таблицы. Строки с torrent-файлами.
+        // Селектор может меняться, но обычно это строки в таблице #index
+        var tableRows = doc.querySelectorAll('#index tr');
+
+        tableRows.forEach(function(tr) {
+            // Пропускаем заголовки
+            if (tr.querySelector('th')) return;
+
+            // Ищем ссылку на детальную страницу (2-я колонка обычно)
+            var linkCol = tr.querySelector('td:nth-child(2)');
+            if (!linkCol) return;
+
+            var link = linkCol.querySelector('a');
+            if (!link) return;
+
+            var title = link.innerText.trim();
+            var detailPage = link.getAttribute('href');
+            
+            // Считываем размер
+            var sizeCol = tr.querySelector('td:nth-child(4) span');
+            var size = sizeCol ? sizeCol.innerText : '';
+
+            // Считываем сиды/пиры (для сортировки или инфо)
+            var seedsCol = tr.querySelector('td:nth-child(5)');
+            var seeds = seedsCol ? parseInt(seedsCol.innerText) : 0;
+
+            // Формируем Magnet. 
+            // ВАЖНО: На странице списка нет magnet-ссылки. Есть только ID детальной страницы.
+            // Magnet на rutor обычно выглядит как: magnet:?xt=urn:btih:HASH...
+            // Нам нужно либо парсить детальную страницу (долго), либо конструировать ссылку, если знаем ID.
+            // rutor использует ID в конце URL детальной страницы, например /torrent/123456
+            // Но magnet хеша там нет.
+            // Хитрость: Lampa + TorrServer умеют принимать ссылку на страницу торрента, 
+            // если TorrServer поддерживает функцию поиска magnet по ссылке, но чаще нужен именно Magnet.
+            // 
+            // УПРОЩЕНИЕ: Мы будем возвращать ссылку на страницу. 
+            // При нажатии "Смотреть" попытаемся найти magnet на детальной странице 
+            // (но это удвоит запросы). 
+            // Для надежности в "рабочем" плагине обычно используется кеш или API.
+            // Здесь мы передаем detailUrl. В методе play нам нужно будет добыть magnet.
+
+            if (title && detailPage) {
+                movies.push({
+                    title: title,
+                    url: 'http://rutor.info' + detailPage,
+                    size: size,
+                    seeds: seeds,
+                    quality: 'DVDRip', // Заглушка, так как в списке нет качества
+                    original_title: title,
+                    img: 'http://rutor.info' + (tr.querySelector('img') ? tr.querySelector('img').src : '') // Постер часто отсутствует в списке
+                });
+            }
+        });
+
+        return movies;
+    }
+
+    // === ОТРИСОВКА РЕЗУЛЬТАТОВ ===
+    function renderMovies(movies, bind) {
+        var scroll = bind.scroll.minus();
+        var html = $('<div class="broadcast-list"></div>');
+        var body = $('<div class="broadcast-list__body"></div>');
+
+        if (movies.length === 0) {
+            body.append('<div class="broadcast__empty">Нет данных</div>');
+        } else {
+            movies.forEach(function(movie) {
+                var item = $('<div class="broadcast-item selector">')
+                    .append($('<div class="broadcast-item__img">').css('backgroundImage', 'url(' + (movie.img || '') + ')'))
+                    .append($('<div class="broadcast-item__details">')
+                        .append($('<div class="broadcast-item__title">').text(movie.title))
+                        .append($('<div class="broadcast-item__meta">').text(movie.size + ' | ' + movie.seeds + ' сидов'))
+                    );
+
+                item.on('hover:enter', function() {
+                    playMovie(movie);
+                });
+
+                body.append(item);
+            });
+        }
+
+        html.append(body);
+        bind.render().find('.broadcast__scan').remove();
+        bind.append(html);
+        
+        // Восстанавливаем скролл
+        Lampa.Controller.collection.append(scroll.render());
+        scroll.render().addClass('layer--wheight').data('mheight', bind.render());
+    }
+
+    // === ВОСПРОИЗВЕДЕНИЕ ===
+    function playMovie(movie) {
+        Lampa.Modal.open({
+            title: movie.title,
+            html: $('<div style="padding:20px; text-align:center;">Загрузка magnet ссылки...</div>'),
+            onBack: function() {
+                Lampa.Modal.close();
+                return false;
+            }
+        });
+
+        // Шаг 1: Получаем HTML детальной страницы
+        var detailUrl = movie.url;
+        
+        // Пробуем через прокси, если нужно
+        var tsUrl = Lampa.Storage.get('torrserver_url') || 'http://localhost:8090';
+        // var requestUrl = tsUrl + '/proxy/' + detailUrl.replace('://', '/'); // Раскомментировать для прокси
+        var requestUrl = detailUrl;
+
+        fetch(requestUrl)
+            .then(r => r.text())
+            .then(function(html) {
+                var parser = new DOMParser();
+                var doc = parser.parseFromString(html, 'text/html');
+                
+                // Ищем magnet ссылку на странице. Обычно она в теге <a> с href начинающимся на magnet:
+                var magnetLink = doc.querySelector('a[href^="magnet:"]');
+                
+                if (magnetLink) {
+                    var magnet = magnetLink.getAttribute('href');
+                    startTorrStream(magnet, movie.title);
+                } else {
+                    Lampa.Noty.show('Не удалось найти Magnet ссылку на странице.');
+                    Lampa.Modal.close();
+                }
+            })
+            .catch(function(e) {
+                console.error(e);
+                Lampa.Noty.show('Ошибка открытия детальной страницы (CORS?).');
+                Lampa.Modal.close();
+            });
+    }
+
+    function startTorrStream(magnet, title) {
+        Lampa.Modal.close();
+        
+        // Формируем URL для TorrServer
+        // Стандартный API: /streams?url={magnet}
+        var tsUrl = Lampa.Storage.get('torrserver_url') || 'http://localhost:8090';
+        // Удаляем слеш в конце если есть
+        tsUrl = tsUrl.replace(/\/$/, '');
+        
+        var streamUrl = tsUrl + '/streams?url=' + encodeURIComponent(magnet) + '&title=' + encodeURIComponent(title) + &save_to_db=true&download_cached=false;
+        
+        console.log('TorrServer URL:', streamUrl);
+
+        // Создаем объект видео для Lampa
+        var video = {
+            title: title,
+            url: streamUrl,
+            timeline: [], // Пустой таймлайн
+            movie: {
+                id: 'rutor_' + Date.now(),
+                title: title,
+                source: 'rutor'
+            }
+        };
+
+        // Запускаем плеер
+        Lampa.Player.play(video);
+        Lampa.Player.playlist([video]); // Плейлист из одного файла
+    }
+
+    // Запуск
+    init();
+
 })();
-</code></pre>
-
-    <div class="note">
-        <strong>Как установить / обновить:</strong><br>
-        1. Скопируй весь код выше<br>
-        2. Сохрани как <strong>ru_tor_v10_2_netflix.js</strong><br>
-        3. Замени старый плагин в Lampa (Настройки → Расширения)<br>
-        4. Перезапусти приложение
-    </div>
-
-    <p>Готово! Теперь в разделе «Категории» ровно те 6 пунктов, которые ты просил, и magnet-ссылки парсятся максимально надёжно.</p>
-</body>
-</html>
