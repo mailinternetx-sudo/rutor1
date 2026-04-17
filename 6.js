@@ -1,24 +1,16 @@
 (function () {
     'use strict';
 
-    var PLUGIN_NAME = 'Мои подборки';
-    var PLUGIN_ID = 'google_sheets_plugin';
-
-    var DEFAULT_SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y';
-    var SHEET_ID = Lampa.Storage.get(PLUGIN_ID + '_sheet_id', DEFAULT_SHEET_ID);
+    var SOURCE_NAME = 'My Collections';
+    var SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y';
 
     function getCsvUrl() {
         return 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv&gid=0';
     }
 
-    var REQUIRED_FIELDS = ['TMDB ID', 'Название'];
-    var DEBUG_MODE = false;
+    var cache = null;
 
-    var cachedData = null;
-    var cacheTime = 0;
-    var CACHE_DURATION = 30 * 60 * 1000;
-
-    // ===== НАДЁЖНЫЙ CSV ПАРСЕР =====
+    // ===== CSV ПАРСЕР =====
     function parseCSV(text) {
         var rows = [];
         var row = [];
@@ -26,10 +18,10 @@
         var inQuotes = false;
 
         for (var i = 0; i < text.length; i++) {
-            var char = text[i];
+            var c = text[i];
             var next = text[i + 1];
 
-            if (char === '"') {
+            if (c === '"') {
                 if (inQuotes && next === '"') {
                     current += '"';
                     i++;
@@ -37,11 +29,11 @@
                     inQuotes = !inQuotes;
                 }
             }
-            else if (char === ',' && !inQuotes) {
+            else if (c === ',' && !inQuotes) {
                 row.push(current);
                 current = '';
             }
-            else if ((char === '\n' || char === '\r') && !inQuotes) {
+            else if ((c === '\n' || c === '\r') && !inQuotes) {
                 if (current || row.length) {
                     row.push(current);
                     rows.push(row);
@@ -50,7 +42,7 @@
                 }
             }
             else {
-                current += char;
+                current += c;
             }
         }
 
@@ -72,6 +64,7 @@
             for (var j = 0; j < headers.length; j++) {
                 obj[headers[j]] = (values[j] || '').trim();
             }
+
             result.push(obj);
         }
 
@@ -79,130 +72,93 @@
     }
 
     function cleanTitle(title) {
-        if (!title) return '';
-        return title
+        return (title || '')
             .split(/[\[\(\|]/)[0]
-            .replace(/[\s\-_\.\,]+$/, '')
             .replace(/\s+/g, ' ')
             .trim();
     }
 
-    function isValidRow(row) {
-        for (var i = 0; i < REQUIRED_FIELDS.length; i++) {
-            var f = REQUIRED_FIELDS[i];
-            if (!row[f] || !row[f].trim()) return false;
-        }
+    function toItem(row) {
+        var id = row['TMDB ID'];
+        if (!/^\d+$/.test(id)) return null;
 
-        var id = row['TMDB ID'].trim();
-        if (!/^\d+$/.test(id)) return false;
-
-        if (!cleanTitle(row['Название'])) return false;
-
-        return true;
-    }
-
-    function toLampaFormat(row) {
-        var idStr = row['TMDB ID'].trim();
-        if (!/^\d+$/.test(idStr)) return null;
-
-        var tmdbId = parseInt(idStr, 10);
-        var rawTitle = row['Название'];
-        var title = cleanTitle(rawTitle);
-
+        var title = cleanTitle(row['Название']);
         if (!title) return null;
 
-        var isTV = /(сериал|season|series|s\d+e\d+|\d+\s*сезон|\[\d+x\d+)/i.test(rawTitle);
-
-        var year = row['Год'] || '';
-        var match = rawTitle.match(/\((\d{4})\)/);
-        if (match && !/^\d{4}$/.test(year)) year = match[1];
+        var year = row['Год'];
 
         return {
-            id: tmdbId,
+            id: parseInt(id, 10),
             title: title,
             original_title: title,
             poster_path: row['Постер'] || '',
-            backdrop_path: row['Фон'] || '',
-            overview: row['Описание'] || '',
             release_date: /^\d{4}$/.test(year) ? year + '-01-01' : '',
-            first_air_date: isTV && year ? year + '-01-01' : undefined,
-            media_type: isTV ? 'tv' : 'movie',
-            vote_average: 0
+            media_type: 'movie'
         };
     }
 
-    function groupByCategory(rows) {
-        var grouped = {};
+    function group(rows) {
+        var g = {};
         rows.forEach(function (r) {
             var cat = r['Категория'] || 'Без категории';
-            if (!grouped[cat]) grouped[cat] = [];
-            grouped[cat].push(r);
+            if (!g[cat]) g[cat] = [];
+            g[cat].push(r);
         });
-        return grouped;
+        return g;
     }
 
-    function loadData(cb, err) {
-        var now = Date.now();
-
-        if (cachedData && now - cacheTime < CACHE_DURATION) {
-            cb(cachedData);
+    function load(callback) {
+        if (cache) {
+            callback(cache);
             return;
         }
 
         Lampa.Reguest.silent(getCsvUrl(), function (res) {
             try {
                 var rows = parseCSV(res);
-                var valid = rows.filter(isValidRow);
-
-                cachedData = groupByCategory(valid);
-                cacheTime = now;
-
-                cb(cachedData);
+                cache = group(rows);
+                callback(cache);
             } catch (e) {
-                err && err('Ошибка обработки CSV');
+                console.log('CSV error', e);
+                callback({});
             }
-        }, function (e) {
-            err && err('Ошибка загрузки');
+        }, function () {
+            callback({});
         });
     }
 
     function Api() {
         var self = this;
 
-        self.list = function (params, onComplete, onError) {
-            loadData(function (data) {
-                var keys = Object.keys(data || {});
-                var category = params.url || keys[0];
+        self.list = function (params, onComplete) {
+            load(function (data) {
+                var keys = Object.keys(data);
+                var cat = params.url || keys[0];
 
-                if (!category) {
-                    onComplete({ results: [] });
-                    return;
-                }
-
-                var items = (data[category] || [])
-                    .map(toLampaFormat)
+                var items = (data[cat] || [])
+                    .map(toItem)
                     .filter(Boolean);
 
                 onComplete({
                     results: items,
                     total_results: items.length
                 });
-            }, onError);
+            });
         };
 
-        self.category = function (params, onSuccess, onError) {
-            loadData(function (data) {
-                var results = Object.keys(data).map(function (cat) {
+        self.category = function (params, onSuccess) {
+            load(function (data) {
+                var result = Object.keys(data).map(function (cat) {
                     return {
                         title: cat,
                         url: cat,
-                        results: data[cat].slice(0, 20).map(toLampaFormat).filter(Boolean),
-                        source: PLUGIN_ID
+                        source: SOURCE_NAME,
+                        results: data[cat].slice(0, 20).map(toItem).filter(Boolean)
                     };
                 });
 
-                onSuccess({ results: results });
-            }, onError);
+                onSuccess({ results: result });
+            });
         };
 
         self.full = function (params, onSuccess, onError) {
@@ -210,37 +166,48 @@
         };
 
         self.main = function (params, onComplete) {
-            self.category({}, onComplete);
+            onComplete([]);
+
+            setTimeout(function () {
+                Lampa.Activity.replace({
+                    component: 'category',
+                    source: SOURCE_NAME,
+                    title: SOURCE_NAME
+                });
+            }, 0);
         };
     }
 
-    function init() {
-        if (window[PLUGIN_ID]) return;
-        window[PLUGIN_ID] = true;
+    function start() {
+        if (window.gs_plugin) return;
+        window.gs_plugin = true;
 
-        Lampa.Api.sources[PLUGIN_ID] = new Api();
+        var api = new Api();
 
-        var item = $('<li class="menu__item selector">\
-            <div class="menu__text">' + PLUGIN_NAME + '</div>\
-        </li>');
+        Lampa.Api.sources[SOURCE_NAME] = api;
 
-        $('.menu .menu__list').eq(0).append(item);
+        if (!$('.menu__item[data-action="gs"]').length) {
+            var item = $('<li class="menu__item selector" data-action="gs">' +
+                '<div class="menu__text">' + SOURCE_NAME + '</div></li>');
 
-        item.on('hover:enter', function () {
-            Lampa.Activity.push({
-                title: PLUGIN_NAME,
-                component: 'category',
-                source: PLUGIN_ID
+            $('.menu .menu__list').eq(0).append(item);
+
+            item.on('hover:enter', function () {
+                Lampa.Activity.push({
+                    component: 'category',
+                    source: SOURCE_NAME,
+                    title: SOURCE_NAME
+                });
             });
-        });
+        }
 
-        Lampa.Noty.show(PLUGIN_NAME + ' активен');
+        Lampa.Noty.show('Google Sheets подключен');
     }
 
-    if (window.appready) init();
+    if (window.appready) start();
     else {
         Lampa.Listener.follow('app', function (e) {
-            if (e.type === 'ready') init();
+            if (e.type === 'ready') start();
         });
     }
 
