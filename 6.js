@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_NAME = 'GS Collections';
+    var PLUGIN_NAME = 'Мои подборки';
     var PLUGIN_ID = 'gs_collections';
 
     var SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y';
@@ -14,7 +14,7 @@
     var cacheTime = 0;
     var CACHE_TIME = 10 * 60 * 1000;
 
-    // ===== CSV ПАРСЕР (надёжный) =====
+    // ===== CSV парсер =====
     function parseCSV(text) {
         var rows = [];
         var row = [];
@@ -78,9 +78,20 @@
             .trim();
     }
 
+    function normalizePoster(url) {
+        if (!url) return '';
+
+        url = url.trim();
+
+        // TMDB URL → path
+        var match = url.match(/\/t\/p\/([^?#]+)/);
+        if (match) return '/t/p/' + match[1];
+
+        return url;
+    }
+
     function toItem(row) {
         var id = row['TMDB ID'];
-
         if (!/^\d+$/.test(id)) return null;
 
         var title = cleanTitle(row['Название']);
@@ -92,22 +103,10 @@
             id: parseInt(id, 10),
             title: title,
             original_title: title,
-            poster_path: normalizePoster(row['Постер']),
+            poster_path: normalizePoster(row['Постер(URL)']),
             release_date: /^\d{4}$/.test(year) ? year + '-01-01' : '',
             media_type: 'movie'
         };
-    }
-
-    function normalizePoster(url) {
-        if (!url) return '';
-
-        url = url.trim();
-
-        // TMDB полный URL → path
-        var match = url.match(/\/t\/p\/([^?#]+)/);
-        if (match) return '/t/p/' + match[1];
-
-        return url;
     }
 
     function groupByCategory(rows) {
@@ -115,6 +114,7 @@
 
         rows.forEach(function (r) {
             var cat = r['Категория'] || 'Без категории';
+
             if (!map[cat]) map[cat] = [];
             map[cat].push(r);
         });
@@ -138,7 +138,7 @@
 
                 callback(cache);
             } catch (e) {
-                console.log('GS parse error', e);
+                console.log('CSV error', e);
                 callback({});
             }
         }, function () {
@@ -204,8 +204,8 @@
     }
 
     function start() {
-        if (window.gs_plugin_v2) return;
-        window.gs_plugin_v2 = true;
+        if (window.gs_plugin_final) return;
+        window.gs_plugin_final = true;
 
         var api = new Api();
         Lampa.Api.sources[PLUGIN_ID] = api;
@@ -225,7 +225,7 @@
             });
         }
 
-        Lampa.Noty.show('GS Collections подключен');
+        Lampa.Noty.show('Подборки из Google Sheets активны');
     }
 
     if (window.appready) start();
