@@ -1,131 +1,142 @@
 (function () {
     'use strict';
 
-    var PLUGIN_NAME = 'Мои подборки PRO';
-    var PLUGIN_ID = 'gs_tmdb_pro_ui';
+    var PLUGIN_ID = 'gs_lampa_fix_pro';
+    var NAME = 'Google Sheets PRO FIX';
 
     var SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y';
     var TMDB_API_KEY = 'f348b4586d1791a40d99edd92164cb86';
 
-    function sheetUrl() {
+    function url() {
         return 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv&gid=0';
     }
 
     var cache = null;
-    var tmdbCache = {};
-    var lastLoad = 0;
-    var CACHE_TIME = 10 * 60 * 1000;
+    var cacheTime = 0;
 
-    // ===== CSV =====
+    // ===== SAFE CSV PARSER =====
     function parseCSV(text) {
-        var rows = text.split('\n').map(r => r.split(','));
-        var headers = rows[0];
+        var lines = text.split('\n').filter(Boolean);
 
-        return rows.slice(1).map(function (r) {
-            var o = {};
-            headers.forEach(function (h, i) {
-                o[h.trim()] = (r[i] || '').trim();
+        var headers = lines[0]
+            .split(',')
+            .map(h => h.replace(/"/g, '').trim());
+
+        var out = [];
+
+        for (var i = 1; i < lines.length; i++) {
+
+            var row = lines[i].split(',');
+
+            var obj = {};
+
+            headers.forEach(function (h, j) {
+                obj[h] = (row[j] || '').replace(/"/g, '').trim();
             });
-            return o;
-        });
+
+            if (obj['TMDB ID']) {
+                out.push(obj);
+            }
+        }
+
+        return out;
     }
 
     function group(rows) {
-        var map = {};
+        var m = {};
+
         rows.forEach(function (r) {
             var c = r['Категория'] || 'Без категории';
-            if (!map[c]) map[c] = [];
-            map[c].push(r);
+            if (!m[c]) m[c] = [];
+            m[c].push(r);
         });
-        return map;
+
+        return m;
     }
 
     function load(cb) {
-        var now = Date.now();
-        if (cache && now - lastLoad < CACHE_TIME) return cb(cache);
 
-        Lampa.Reguest.silent(sheetUrl(), function (res) {
+        var now = Date.now();
+
+        if (cache && now - cacheTime < 10 * 60 * 1000) {
+            return cb(cache);
+        }
+
+        Lampa.Reguest.silent(url(), function (res) {
+
+            if (!res || typeof res !== 'string') {
+                console.log('[GS] EMPTY CSV');
+                return cb({});
+            }
+
             cache = group(parseCSV(res));
-            lastLoad = now;
+            cacheTime = now;
+
+            console.log('[GS] LOADED:', Object.keys(cache));
+
             cb(cache);
-        }, function () {
+
+        }, function (e) {
+            console.log('[GS ERROR]', e);
             cb({});
         });
     }
 
-    // ===== TMDB PRO CACHE =====
-    function getTMDB(id, cb) {
-        if (tmdbCache[id]) return cb(tmdbCache[id]);
+    // ===== TMDB SAFE =====
+    function tmdb(id, cb) {
 
-        var url = 'https://api.themoviedb.org/3/movie/' + id +
+        var movie = 'https://api.themoviedb.org/3/movie/' + id +
             '?api_key=' + TMDB_API_KEY + '&language=ru';
 
-        Lampa.Reguest.silent(url, function (m) {
+        Lampa.Reguest.silent(movie, function (m) {
 
-            if (m && m.id) {
-                tmdbCache[id] = {
-                    type: 'movie',
-                    data: m
-                };
-                return cb(tmdbCache[id]);
-            }
+            if (m && m.id) return cb({ type: 'movie', data: m });
 
-            var url2 = 'https://api.themoviedb.org/3/tv/' + id +
+            var tv = 'https://api.themoviedb.org/3/tv/' + id +
                 '?api_key=' + TMDB_API_KEY + '&language=ru';
 
-            Lampa.Reguest.silent(url2, function (t) {
+            Lampa.Reguest.silent(tv, function (t) {
 
-                if (t && t.id) {
-                    tmdbCache[id] = {
-                        type: 'tv',
-                        data: t
-                    };
-                    return cb(tmdbCache[id]);
-                }
+                if (t && t.id) return cb({ type: 'tv', data: t });
 
                 cb(null);
 
-            }, function () {
-                cb(null);
-            });
+            }, function () { cb(null); });
 
-        }, function () {
-            cb(null);
-        });
+        }, function () { cb(null); });
     }
 
-    function buildPro(rows, onCard, done) {
+    function build(rows, cb) {
 
+        var results = [];
         var i = 0;
 
         function next() {
-            if (i >= rows.length) return done();
 
-            var id = rows[i]['TMDB ID'];
-            i++;
+            if (i >= rows.length) return cb(results);
+
+            var id = rows[i++]['TMDB ID'];
 
             if (!id) return next();
 
-            getTMDB(id, function (meta) {
+            tmdb(id, function (m) {
 
-                if (meta) {
-                    var d = meta.data;
+                if (m) {
+                    var d = m.data;
 
-                    // 🔥 PRO CARD (максимально полные данные)
-                    onCard({
+                    results.push({
                         id: d.id,
                         title: d.title || d.name,
                         original_title: d.original_title || d.original_name,
-                        overview: d.overview,
                         poster_path: d.poster_path,
                         backdrop_path: d.backdrop_path,
+                        overview: d.overview,
                         vote_average: d.vote_average,
-                        media_type: meta.type
+                        media_type: m.type
                     });
                 }
 
-                // ⚡ маленькая задержка = плавный UI как Netflix/NUMParser
-                setTimeout(next, 20);
+                setTimeout(next, 30);
             });
         }
 
@@ -138,25 +149,23 @@
         self.list = function (p, cb) {
 
             load(function (data) {
-                var cat = p.url || Object.keys(data)[0];
-                if (!cat) return cb({ results: [] });
 
-                var results = [];
+                var keys = Object.keys(data);
 
-                buildPro(data[cat], function (item) {
-                    results.push(item);
+                if (!keys.length) {
+                    console.log('[GS] NO CATEGORIES');
+                    return cb({ results: [] });
+                }
 
-                    // 🔥 мгновенный UI update (PRO FEEL)
-                    cb({
-                        results: results.slice(),
-                        partial: true
-                    });
+                var cat = p.url || keys[0];
 
-                }, function () {
-                    cb({
-                        results: results,
-                        partial: false
-                    });
+                if (!data[cat]) {
+                    console.log('[GS] BAD CATEGORY:', cat);
+                    cat = keys[0];
+                }
+
+                build(data[cat], function (items) {
+                    cb({ results: items });
                 });
             });
         };
@@ -165,26 +174,28 @@
 
             load(function (data) {
 
-                var cats = Object.keys(data);
+                var keys = Object.keys(data);
                 var out = [];
                 var i = 0;
 
                 function next() {
-                    if (i >= cats.length) return cb({ results: out });
 
-                    var c = cats[i];
+                    if (i >= keys.length) {
+                        return cb({ results: out });
+                    }
 
-                    buildPro(data[c].slice(0, 20), function () {}, function () {
+                    var c = keys[i++];
+
+                    build(data[c].slice(0, 15), function (items) {
 
                         out.push({
                             title: c,
                             url: c,
                             source: PLUGIN_ID,
-                            results: [], // быстро, а внутри list уже PRO поток
-                            more: data[c].length > 20
+                            results: items,
+                            more: data[c].length > 15
                         });
 
-                        i++;
                         next();
                     });
                 }
@@ -204,20 +215,21 @@
                 Lampa.Activity.replace({
                     component: 'category',
                     source: PLUGIN_ID,
-                    title: PLUGIN_NAME
+                    title: NAME
                 });
             }, 0);
         };
     }
 
     function start() {
-        if (window.gs_pro_ui) return;
-        window.gs_pro_ui = true;
+
+        if (window.gs_fix_ready) return;
+        window.gs_fix_ready = true;
 
         var api = new Api();
         Lampa.Api.sources[PLUGIN_ID] = api;
 
-        var item = $('<li class="menu__item selector"><div class="menu__text">' + PLUGIN_NAME + '</div></li>');
+        var item = $('<li class="menu__item selector"><div class="menu__text">' + NAME + '</div></li>');
 
         $('.menu .menu__list').eq(0).append(item);
 
@@ -225,11 +237,11 @@
             Lampa.Activity.push({
                 component: 'category',
                 source: PLUGIN_ID,
-                title: PLUGIN_NAME
+                title: NAME
             });
         });
 
-        Lampa.Noty.show('PRO UI включён 🚀');
+        Lampa.Noty.show('GS FIX PRO активен');
     }
 
     if (window.appready) start();
