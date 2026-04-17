@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var PLUGIN_NAME = 'Мои подборки';
-    var PLUGIN_ID = 'gs_tmdb_ultra_fix';
+    var PLUGIN_NAME = 'Мои подборки PRO';
+    var PLUGIN_ID = 'gs_tmdb_pro_ui';
 
     var SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y';
     var TMDB_API_KEY = 'f348b4586d1791a40d99edd92164cb86';
@@ -12,7 +12,8 @@
     }
 
     var cache = null;
-    var last = 0;
+    var tmdbCache = {};
+    var lastLoad = 0;
     var CACHE_TIME = 10 * 60 * 1000;
 
     // ===== CSV =====
@@ -30,52 +31,56 @@
     }
 
     function group(rows) {
-        var m = {};
+        var map = {};
         rows.forEach(function (r) {
             var c = r['Категория'] || 'Без категории';
-            if (!m[c]) m[c] = [];
-            m[c].push(r);
+            if (!map[c]) map[c] = [];
+            map[c].push(r);
         });
-        return m;
+        return map;
     }
 
     function load(cb) {
         var now = Date.now();
-        if (cache && now - last < CACHE_TIME) return cb(cache);
+        if (cache && now - lastLoad < CACHE_TIME) return cb(cache);
 
         Lampa.Reguest.silent(sheetUrl(), function (res) {
             cache = group(parseCSV(res));
-            last = now;
+            lastLoad = now;
             cb(cache);
         }, function () {
             cb({});
         });
     }
 
-    // ===== TMDB SAFE FETCH =====
-    function fetch(id, cb) {
+    // ===== TMDB PRO CACHE =====
+    function getTMDB(id, cb) {
+        if (tmdbCache[id]) return cb(tmdbCache[id]);
 
-        var movie = 'https://api.themoviedb.org/3/movie/' + id + '?api_key=' + TMDB_API_KEY + '&language=ru';
-        var tv = 'https://api.themoviedb.org/3/tv/' + id + '?api_key=' + TMDB_API_KEY + '&language=ru';
+        var url = 'https://api.themoviedb.org/3/movie/' + id +
+            '?api_key=' + TMDB_API_KEY + '&language=ru';
 
-        Lampa.Reguest.silent(movie, function (m) {
+        Lampa.Reguest.silent(url, function (m) {
 
             if (m && m.id) {
-                return cb({
+                tmdbCache[id] = {
                     type: 'movie',
                     data: m
-                });
+                };
+                return cb(tmdbCache[id]);
             }
 
-        }, function () {
+            var url2 = 'https://api.themoviedb.org/3/tv/' + id +
+                '?api_key=' + TMDB_API_KEY + '&language=ru';
 
-            Lampa.Reguest.silent(tv, function (t) {
+            Lampa.Reguest.silent(url2, function (t) {
 
                 if (t && t.id) {
-                    return cb({
+                    tmdbCache[id] = {
                         type: 'tv',
                         data: t
-                    });
+                    };
+                    return cb(tmdbCache[id]);
                 }
 
                 cb(null);
@@ -84,49 +89,47 @@
                 cb(null);
             });
 
+        }, function () {
+            cb(null);
         });
     }
 
-    // ===== PARALLEL BUILDER =====
-    function build(rows, done) {
+    function buildPro(rows, onCard, done) {
 
-        rows = rows.filter(r => r['TMDB ID'])
-                   .filter((v, i, a) =>
-                        a.findIndex(x => x['TMDB ID'] === v['TMDB ID']) === i
-                   );
+        var i = 0;
 
-        var results = [];
-        var left = rows.length;
+        function next() {
+            if (i >= rows.length) return done();
 
-        if (!left) return done([]);
+            var id = rows[i]['TMDB ID'];
+            i++;
 
-        rows.forEach(function (row) {
+            if (!id) return next();
 
-            fetch(row['TMDB ID'], function (meta) {
+            getTMDB(id, function (meta) {
 
-                if (meta && meta.data) {
-
+                if (meta) {
                     var d = meta.data;
 
-                    results.push({
+                    // 🔥 PRO CARD (максимально полные данные)
+                    onCard({
                         id: d.id,
                         title: d.title || d.name,
                         original_title: d.original_title || d.original_name,
+                        overview: d.overview,
                         poster_path: d.poster_path,
                         backdrop_path: d.backdrop_path,
-                        overview: d.overview,
                         vote_average: d.vote_average,
                         media_type: meta.type
                     });
                 }
 
-                left--;
-
-                if (left === 0) {
-                    done(results);
-                }
+                // ⚡ маленькая задержка = плавный UI как Netflix/NUMParser
+                setTimeout(next, 20);
             });
-        });
+        }
+
+        next();
     }
 
     function Api() {
@@ -138,8 +141,22 @@
                 var cat = p.url || Object.keys(data)[0];
                 if (!cat) return cb({ results: [] });
 
-                build(data[cat], function (items) {
-                    cb({ results: items });
+                var results = [];
+
+                buildPro(data[cat], function (item) {
+                    results.push(item);
+
+                    // 🔥 мгновенный UI update (PRO FEEL)
+                    cb({
+                        results: results.slice(),
+                        partial: true
+                    });
+
+                }, function () {
+                    cb({
+                        results: results,
+                        partial: false
+                    });
                 });
             });
         };
@@ -157,13 +174,13 @@
 
                     var c = cats[i];
 
-                    build(data[c].slice(0, 20), function (items) {
+                    buildPro(data[c].slice(0, 20), function () {}, function () {
 
                         out.push({
                             title: c,
                             url: c,
                             source: PLUGIN_ID,
-                            results: items,
+                            results: [], // быстро, а внутри list уже PRO поток
                             more: data[c].length > 20
                         });
 
@@ -194,8 +211,8 @@
     }
 
     function start() {
-        if (window.gs_fixed) return;
-        window.gs_fixed = true;
+        if (window.gs_pro_ui) return;
+        window.gs_pro_ui = true;
 
         var api = new Api();
         Lampa.Api.sources[PLUGIN_ID] = api;
@@ -212,7 +229,7 @@
             });
         });
 
-        Lampa.Noty.show('ULTRA FIX версия активна');
+        Lampa.Noty.show('PRO UI включён 🚀');
     }
 
     if (window.appready) start();
