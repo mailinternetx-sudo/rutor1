@@ -2,7 +2,7 @@
     'use strict';
 
     var PLUGIN_NAME = 'Мои подборки';
-    var PLUGIN_ID = 'gs_collections';
+    var PLUGIN_ID = 'gs_collections_tmdb';
 
     var SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y';
 
@@ -11,10 +11,11 @@
     }
 
     var cache = null;
-    var cacheTime = 0;
+    var metaCache = {};
     var CACHE_TIME = 10 * 60 * 1000;
+    var lastLoad = 0;
 
-    // ===== CSV парсер =====
+    // ===== CSV ПАРСЕР =====
     function parseCSV(text) {
         var rows = [];
         var row = [];
@@ -80,52 +81,81 @@
 
     function normalizePoster(url) {
         if (!url) return '';
-
-        url = url.trim();
-
-        // TMDB URL → path
         var match = url.match(/\/t\/p\/([^?#]+)/);
         if (match) return '/t/p/' + match[1];
-
         return url;
     }
 
-    function toItem(row) {
+    // ===== ОПРЕДЕЛЕНИЕ ТИПА ЧЕРЕЗ TMDB =====
+    function resolveType(id, callback) {
+        if (metaCache[id]) {
+            callback(metaCache[id]);
+            return;
+        }
+
+        var done = false;
+
+        // пробуем movie
+        Lampa.Api.sources.tmdb.full({
+            id: id,
+            method: 'movie'
+        }, function () {
+            metaCache[id] = 'movie';
+            if (!done) callback('movie');
+            done = true;
+        }, function () {
+
+            // если не movie — пробуем tv
+            Lampa.Api.sources.tmdb.full({
+                id: id,
+                method: 'tv'
+            }, function () {
+                metaCache[id] = 'tv';
+                if (!done) callback('tv');
+                done = true;
+            }, function () {
+                metaCache[id] = 'movie';
+                if (!done) callback('movie');
+                done = true;
+            });
+
+        });
+    }
+
+    function toItem(row, callback) {
         var id = row['TMDB ID'];
-        if (!/^\d+$/.test(id)) return null;
+        if (!/^\d+$/.test(id)) return callback(null);
 
         var title = cleanTitle(row['Название']);
-        if (!title) return null;
+        if (!title) return callback(null);
 
-        var year = row['Год'];
+        resolveType(id, function (type) {
 
-        return {
-            id: parseInt(id, 10),
-            title: title,
-            original_title: title,
-            poster_path: normalizePoster(row['Постер(URL)']),
-            release_date: /^\d{4}$/.test(year) ? year + '-01-01' : '',
-            media_type: 'movie'
-        };
+            callback({
+                id: parseInt(id, 10),
+                title: title,
+                original_title: title,
+                poster_path: normalizePoster(row['Постер']),
+                media_type: type
+            });
+
+        });
     }
 
     function groupByCategory(rows) {
         var map = {};
-
         rows.forEach(function (r) {
             var cat = r['Категория'] || 'Без категории';
-
             if (!map[cat]) map[cat] = [];
             map[cat].push(r);
         });
-
         return map;
     }
 
     function load(callback) {
         var now = Date.now();
 
-        if (cache && (now - cacheTime < CACHE_TIME)) {
+        if (cache && (now - lastLoad < CACHE_TIME)) {
             callback(cache);
             return;
         }
@@ -134,8 +164,7 @@
             try {
                 var rows = parseCSV(res);
                 cache = groupByCategory(rows);
-                cacheTime = now;
-
+                lastLoad = now;
                 callback(cache);
             } catch (e) {
                 console.log('CSV error', e);
@@ -144,6 +173,26 @@
         }, function () {
             callback({});
         });
+    }
+
+    function buildItems(rows, done) {
+        var result = [];
+        var index = 0;
+
+        function next() {
+            if (index >= rows.length) {
+                done(result);
+                return;
+            }
+
+            toItem(rows[index], function (item) {
+                if (item) result.push(item);
+                index++;
+                next();
+            });
+        }
+
+        next();
     }
 
     function Api() {
@@ -159,30 +208,44 @@
                     return;
                 }
 
-                var items = (data[category] || [])
-                    .map(toItem)
-                    .filter(Boolean);
-
-                onComplete({
-                    results: items,
-                    total_results: items.length
+                buildItems(data[category], function (items) {
+                    onComplete({
+                        results: items,
+                        total_results: items.length
+                    });
                 });
             });
         };
 
         self.category = function (params, onSuccess) {
             load(function (data) {
-                var result = Object.keys(data).map(function (cat) {
-                    return {
-                        title: cat,
-                        url: cat,
-                        source: PLUGIN_ID,
-                        results: data[cat].slice(0, 20).map(toItem).filter(Boolean),
-                        more: data[cat].length > 20
-                    };
-                });
+                var cats = Object.keys(data);
+                var result = [];
+                var index = 0;
 
-                onSuccess({ results: result });
+                function next() {
+                    if (index >= cats.length) {
+                        onSuccess({ results: result });
+                        return;
+                    }
+
+                    var cat = cats[index];
+
+                    buildItems(data[cat].slice(0, 20), function (items) {
+                        result.push({
+                            title: cat,
+                            url: cat,
+                            source: PLUGIN_ID,
+                            results: items,
+                            more: data[cat].length > 20
+                        });
+
+                        index++;
+                        next();
+                    });
+                }
+
+                next();
             });
         };
 
@@ -204,8 +267,8 @@
     }
 
     function start() {
-        if (window.gs_plugin_final) return;
-        window.gs_plugin_final = true;
+        if (window.gs_tmdb_plugin) return;
+        window.gs_tmdb_plugin = true;
 
         var api = new Api();
         Lampa.Api.sources[PLUGIN_ID] = api;
@@ -225,7 +288,7 @@
             });
         }
 
-        Lampa.Noty.show('Подборки из Google Sheets активны');
+        Lampa.Noty.show('Google Sheets + TMDB активен');
     }
 
     if (window.appready) start();
