@@ -4,7 +4,7 @@
     // ===== НАСТРОЙКИ =====
     var PLUGIN_NAME = 'Мои подборки';
     var PLUGIN_ID = 'google_sheets_plugin';
-    var SHEET_ID = '2PACX-1vTPRnI936f_dcbiBV1ipgu6YW32GmTunbdNmNxs7H0G4P8Sjyg7SoAcQTzoN-YBqG2gaxdeYTOsiV8c'; // Замените на ваш ID
+    var SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y'; // Замените на ваш ID
     var CSV_URL = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv&gid=0';
     
     var ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-8 14H5v-2h6v2zm0-4H5v-2h6v2zm0-4H5V7h6v2zm8 8h-6v-2h6v2zm0-4h-6v-2h6v2zm0-4h-6V7h6v2z"/></svg>';
