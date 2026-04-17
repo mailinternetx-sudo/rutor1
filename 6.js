@@ -2,128 +2,36 @@
     'use strict';
 
     var PLUGIN_NAME = 'Мои подборки';
-    var PLUGIN_ID = 'gs_tmdb_fast';
+    var PLUGIN_ID = 'gs_tmdb_ultra';
 
     var SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y';
     var TMDB_API_KEY = 'f348b4586d1791a40d99edd92164cb86';
 
-    function getUrl() {
+    function getSheetUrl() {
         return 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv&gid=0';
     }
 
     var cache = null;
     var metaCache = {};
-    var lastLoad = 0;
     var CACHE_TIME = 10 * 60 * 1000;
+    var lastLoad = 0;
 
     // ===== CSV =====
     function parseCSV(text) {
-        var rows = [];
-        var row = [];
-        var current = '';
-        var inQuotes = false;
-
-        for (var i = 0; i < text.length; i++) {
-            var c = text[i], next = text[i + 1];
-
-            if (c === '"') {
-                if (inQuotes && next === '"') {
-                    current += '"';
-                    i++;
-                } else inQuotes = !inQuotes;
-            }
-            else if (c === ',' && !inQuotes) {
-                row.push(current); current = '';
-            }
-            else if ((c === '\n' || c === '\r') && !inQuotes) {
-                if (current || row.length) {
-                    row.push(current);
-                    rows.push(row);
-                    row = []; current = '';
-                }
-            }
-            else current += c;
-        }
-
-        if (current || row.length) {
-            row.push(current);
-            rows.push(row);
-        }
+        var rows = text.split('\n').map(function (r) {
+            return r.split(',');
+        });
 
         if (rows.length < 2) return [];
 
         var headers = rows[0].map(function (h) { return h.trim(); });
 
         return rows.slice(1).map(function (vals) {
-            if (vals.length !== headers.length) return null;
             var obj = {};
             headers.forEach(function (h, i) {
                 obj[h] = (vals[i] || '').trim();
             });
             return obj;
-        }).filter(Boolean);
-    }
-
-    function cleanTitle(t) {
-        return (t || '')
-            .split(/[\[\(\|]/)[0]
-            .replace(/\s+/g, ' ')
-            .trim();
-    }
-
-    function normalizePoster(url) {
-        if (!url) return '';
-        var m = url.match(/\/t\/p\/([^?#]+)/);
-        return m ? '/t/p/' + m[1] : url;
-    }
-
-    // ===== БЫСТРОЕ ОПРЕДЕЛЕНИЕ ТИПА =====
-    function detectType(id, title, callback) {
-        if (metaCache[id]) {
-            callback(metaCache[id]);
-            return;
-        }
-
-        var url = 'https://api.themoviedb.org/3/search/multi?api_key=' +
-            TMDB_API_KEY +
-            '&query=' + encodeURIComponent(title);
-
-        Lampa.Reguest.silent(url, function (json) {
-            var type = 'movie';
-
-            if (json && json.results && json.results.length) {
-                var match = json.results.find(function (r) {
-                    return r.id == id;
-                });
-
-                if (match && match.media_type) {
-                    type = match.media_type;
-                }
-            }
-
-            metaCache[id] = type;
-            callback(type);
-
-        }, function () {
-            callback('movie');
-        });
-    }
-
-    function toItem(row, cb) {
-        var id = row['TMDB ID'];
-        if (!/^\d+$/.test(id)) return cb(null);
-
-        var title = cleanTitle(row['Название']);
-        if (!title) return cb(null);
-
-        detectType(id, title, function (type) {
-            cb({
-                id: parseInt(id, 10),
-                title: title,
-                original_title: title,
-                poster_path: normalizePoster(row['Постер']),
-                media_type: type
-            });
         });
     }
 
@@ -137,15 +45,15 @@
         return map;
     }
 
-    function load(cb) {
+    function loadSheet(cb) {
         var now = Date.now();
 
-        if (cache && (now - lastLoad < CACHE_TIME)) {
+        if (cache && now - lastLoad < CACHE_TIME) {
             cb(cache);
             return;
         }
 
-        Lampa.Reguest.silent(getUrl(), function (res) {
+        Lampa.Reguest.silent(getSheetUrl(), function (res) {
             try {
                 cache = group(parseCSV(res));
                 lastLoad = now;
@@ -158,15 +66,80 @@
         });
     }
 
+    // ===== TMDB =====
+    function fetchTMDB(id, callback) {
+        if (metaCache[id]) {
+            callback(metaCache[id]);
+            return;
+        }
+
+        var movieUrl = 'https://api.themoviedb.org/3/movie/' + id + '?api_key=' + TMDB_API_KEY + '&language=ru';
+        var tvUrl = 'https://api.themoviedb.org/3/tv/' + id + '?api_key=' + TMDB_API_KEY + '&language=ru';
+
+        Lampa.Reguest.silent(movieUrl, function (movie) {
+
+            if (movie && movie.id) {
+                metaCache[id] = {
+                    type: 'movie',
+                    data: movie
+                };
+                callback(metaCache[id]);
+            }
+
+        }, function () {
+
+            Lampa.Reguest.silent(tvUrl, function (tv) {
+
+                if (tv && tv.id) {
+                    metaCache[id] = {
+                        type: 'tv',
+                        data: tv
+                    };
+                    callback(metaCache[id]);
+                }
+
+            }, function () {
+                callback(null);
+            });
+
+        });
+    }
+
+    function toLampa(item, meta) {
+        var d = meta.data;
+
+        return {
+            id: d.id,
+            title: d.title || d.name,
+            original_title: d.original_title || d.original_name,
+            overview: d.overview,
+            poster_path: d.poster_path,
+            backdrop_path: d.backdrop_path,
+            vote_average: d.vote_average,
+            release_date: d.release_date,
+            first_air_date: d.first_air_date,
+            media_type: meta.type
+        };
+    }
+
     function build(rows, done) {
-        var result = [];
+        var results = [];
         var i = 0;
 
         function next() {
-            if (i >= rows.length) return done(result);
+            if (i >= rows.length) return done(results);
 
-            toItem(rows[i], function (item) {
-                if (item) result.push(item);
+            var id = rows[i]['TMDB ID'];
+
+            if (!/^\d+$/.test(id)) {
+                i++;
+                return next();
+            }
+
+            fetchTMDB(id, function (meta) {
+                if (meta) {
+                    results.push(toLampa(rows[i], meta));
+                }
                 i++;
                 next();
             });
@@ -179,9 +152,8 @@
         var self = this;
 
         self.list = function (params, onComplete) {
-            load(function (data) {
+            loadSheet(function (data) {
                 var cat = params.url || Object.keys(data)[0];
-
                 if (!cat) return onComplete({ results: [] });
 
                 build(data[cat], function (items) {
@@ -194,7 +166,7 @@
         };
 
         self.category = function (params, onSuccess) {
-            load(function (data) {
+            loadSheet(function (data) {
                 var cats = Object.keys(data);
                 var res = [];
                 var i = 0;
@@ -239,8 +211,8 @@
     }
 
     function start() {
-        if (window.gs_fast_plugin) return;
-        window.gs_fast_plugin = true;
+        if (window.gs_ultra) return;
+        window.gs_ultra = true;
 
         var api = new Api();
         Lampa.Api.sources[PLUGIN_ID] = api;
@@ -258,7 +230,7 @@
             });
         });
 
-        Lampa.Noty.show('GS + TMDB FAST запущен');
+        Lampa.Noty.show('ULTRA TMDB плагин активен 🚀');
     }
 
     if (window.appready) start();
