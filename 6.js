@@ -2,9 +2,10 @@
     'use strict';
 
     var PLUGIN_NAME = 'Мои подборки';
-    var PLUGIN_ID = 'gs_collections_tmdb';
+    var PLUGIN_ID = 'gs_tmdb_fast';
 
     var SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y';
+    var TMDB_API_KEY = 'f348b4586d1791a40d99edd92164cb86';
 
     function getUrl() {
         return 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv&gid=0';
@@ -12,10 +13,10 @@
 
     var cache = null;
     var metaCache = {};
-    var CACHE_TIME = 10 * 60 * 1000;
     var lastLoad = 0;
+    var CACHE_TIME = 10 * 60 * 1000;
 
-    // ===== CSV ПАРСЕР =====
+    // ===== CSV =====
     function parseCSV(text) {
         var rows = [];
         var row = [];
@@ -23,32 +24,25 @@
         var inQuotes = false;
 
         for (var i = 0; i < text.length; i++) {
-            var c = text[i];
-            var next = text[i + 1];
+            var c = text[i], next = text[i + 1];
 
             if (c === '"') {
                 if (inQuotes && next === '"') {
                     current += '"';
                     i++;
-                } else {
-                    inQuotes = !inQuotes;
-                }
+                } else inQuotes = !inQuotes;
             }
             else if (c === ',' && !inQuotes) {
-                row.push(current);
-                current = '';
+                row.push(current); current = '';
             }
             else if ((c === '\n' || c === '\r') && !inQuotes) {
                 if (current || row.length) {
                     row.push(current);
                     rows.push(row);
-                    row = [];
-                    current = '';
+                    row = []; current = '';
                 }
             }
-            else {
-                current += c;
-            }
+            else current += c;
         }
 
         if (current || row.length) {
@@ -60,14 +54,12 @@
 
         var headers = rows[0].map(function (h) { return h.trim(); });
 
-        return rows.slice(1).map(function (values) {
-            if (values.length !== headers.length) return null;
-
+        return rows.slice(1).map(function (vals) {
+            if (vals.length !== headers.length) return null;
             var obj = {};
             headers.forEach(function (h, i) {
-                obj[h] = (values[i] || '').trim();
+                obj[h] = (vals[i] || '').trim();
             });
-
             return obj;
         }).filter(Boolean);
     }
@@ -81,68 +73,61 @@
 
     function normalizePoster(url) {
         if (!url) return '';
-        var match = url.match(/\/t\/p\/([^?#]+)/);
-        if (match) return '/t/p/' + match[1];
-        return url;
+        var m = url.match(/\/t\/p\/([^?#]+)/);
+        return m ? '/t/p/' + m[1] : url;
     }
 
-    // ===== ОПРЕДЕЛЕНИЕ ТИПА ЧЕРЕЗ TMDB =====
-    function resolveType(id, callback) {
+    // ===== БЫСТРОЕ ОПРЕДЕЛЕНИЕ ТИПА =====
+    function detectType(id, title, callback) {
         if (metaCache[id]) {
             callback(metaCache[id]);
             return;
         }
 
-        var done = false;
+        var url = 'https://api.themoviedb.org/3/search/multi?api_key=' +
+            TMDB_API_KEY +
+            '&query=' + encodeURIComponent(title);
 
-        // пробуем movie
-        Lampa.Api.sources.tmdb.full({
-            id: id,
-            method: 'movie'
+        Lampa.Reguest.silent(url, function (json) {
+            var type = 'movie';
+
+            if (json && json.results && json.results.length) {
+                var match = json.results.find(function (r) {
+                    return r.id == id;
+                });
+
+                if (match && match.media_type) {
+                    type = match.media_type;
+                }
+            }
+
+            metaCache[id] = type;
+            callback(type);
+
         }, function () {
-            metaCache[id] = 'movie';
-            if (!done) callback('movie');
-            done = true;
-        }, function () {
-
-            // если не movie — пробуем tv
-            Lampa.Api.sources.tmdb.full({
-                id: id,
-                method: 'tv'
-            }, function () {
-                metaCache[id] = 'tv';
-                if (!done) callback('tv');
-                done = true;
-            }, function () {
-                metaCache[id] = 'movie';
-                if (!done) callback('movie');
-                done = true;
-            });
-
+            callback('movie');
         });
     }
 
-    function toItem(row, callback) {
+    function toItem(row, cb) {
         var id = row['TMDB ID'];
-        if (!/^\d+$/.test(id)) return callback(null);
+        if (!/^\d+$/.test(id)) return cb(null);
 
         var title = cleanTitle(row['Название']);
-        if (!title) return callback(null);
+        if (!title) return cb(null);
 
-        resolveType(id, function (type) {
-
-            callback({
+        detectType(id, title, function (type) {
+            cb({
                 id: parseInt(id, 10),
                 title: title,
                 original_title: title,
                 poster_path: normalizePoster(row['Постер']),
                 media_type: type
             });
-
         });
     }
 
-    function groupByCategory(rows) {
+    function group(rows) {
         var map = {};
         rows.forEach(function (r) {
             var cat = r['Категория'] || 'Без категории';
@@ -152,42 +137,37 @@
         return map;
     }
 
-    function load(callback) {
+    function load(cb) {
         var now = Date.now();
 
         if (cache && (now - lastLoad < CACHE_TIME)) {
-            callback(cache);
+            cb(cache);
             return;
         }
 
         Lampa.Reguest.silent(getUrl(), function (res) {
             try {
-                var rows = parseCSV(res);
-                cache = groupByCategory(rows);
+                cache = group(parseCSV(res));
                 lastLoad = now;
-                callback(cache);
+                cb(cache);
             } catch (e) {
-                console.log('CSV error', e);
-                callback({});
+                cb({});
             }
         }, function () {
-            callback({});
+            cb({});
         });
     }
 
-    function buildItems(rows, done) {
+    function build(rows, done) {
         var result = [];
-        var index = 0;
+        var i = 0;
 
         function next() {
-            if (index >= rows.length) {
-                done(result);
-                return;
-            }
+            if (i >= rows.length) return done(result);
 
-            toItem(rows[index], function (item) {
+            toItem(rows[i], function (item) {
                 if (item) result.push(item);
-                index++;
+                i++;
                 next();
             });
         }
@@ -200,15 +180,11 @@
 
         self.list = function (params, onComplete) {
             load(function (data) {
-                var keys = Object.keys(data);
-                var category = params.url || keys[0];
+                var cat = params.url || Object.keys(data)[0];
 
-                if (!category) {
-                    onComplete({ results: [] });
-                    return;
-                }
+                if (!cat) return onComplete({ results: [] });
 
-                buildItems(data[category], function (items) {
+                build(data[cat], function (items) {
                     onComplete({
                         results: items,
                         total_results: items.length
@@ -220,27 +196,23 @@
         self.category = function (params, onSuccess) {
             load(function (data) {
                 var cats = Object.keys(data);
-                var result = [];
-                var index = 0;
+                var res = [];
+                var i = 0;
 
                 function next() {
-                    if (index >= cats.length) {
-                        onSuccess({ results: result });
-                        return;
-                    }
+                    if (i >= cats.length) return onSuccess({ results: res });
 
-                    var cat = cats[index];
+                    var cat = cats[i];
 
-                    buildItems(data[cat].slice(0, 20), function (items) {
-                        result.push({
+                    build(data[cat].slice(0, 20), function (items) {
+                        res.push({
                             title: cat,
                             url: cat,
                             source: PLUGIN_ID,
                             results: items,
                             more: data[cat].length > 20
                         });
-
-                        index++;
+                        i++;
                         next();
                     });
                 }
@@ -267,28 +239,26 @@
     }
 
     function start() {
-        if (window.gs_tmdb_plugin) return;
-        window.gs_tmdb_plugin = true;
+        if (window.gs_fast_plugin) return;
+        window.gs_fast_plugin = true;
 
         var api = new Api();
         Lampa.Api.sources[PLUGIN_ID] = api;
 
-        if (!$('.menu__item[data-action="gs"]').length) {
-            var item = $('<li class="menu__item selector" data-action="gs">' +
-                '<div class="menu__text">' + PLUGIN_NAME + '</div></li>');
+        var item = $('<li class="menu__item selector">' +
+            '<div class="menu__text">' + PLUGIN_NAME + '</div></li>');
 
-            $('.menu .menu__list').eq(0).append(item);
+        $('.menu .menu__list').eq(0).append(item);
 
-            item.on('hover:enter', function () {
-                Lampa.Activity.push({
-                    component: 'category',
-                    source: PLUGIN_ID,
-                    title: PLUGIN_NAME
-                });
+        item.on('hover:enter', function () {
+            Lampa.Activity.push({
+                component: 'category',
+                source: PLUGIN_ID,
+                title: PLUGIN_NAME
             });
-        }
+        });
 
-        Lampa.Noty.show('Google Sheets + TMDB активен');
+        Lampa.Noty.show('GS + TMDB FAST запущен');
     }
 
     if (window.appready) start();
