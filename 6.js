@@ -2,188 +2,171 @@
     'use strict';
 
     var PLUGIN_NAME = 'Мои подборки';
-    var PLUGIN_ID = 'gs_tmdb_ultra';
+    var PLUGIN_ID = 'gs_tmdb_ultra_fix';
 
     var SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y';
     var TMDB_API_KEY = 'f348b4586d1791a40d99edd92164cb86';
 
-    function getSheetUrl() {
+    function sheetUrl() {
         return 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv&gid=0';
     }
 
     var cache = null;
-    var metaCache = {};
+    var last = 0;
     var CACHE_TIME = 10 * 60 * 1000;
-    var lastLoad = 0;
 
     // ===== CSV =====
     function parseCSV(text) {
-        var rows = text.split('\n').map(function (r) {
-            return r.split(',');
-        });
+        var rows = text.split('\n').map(r => r.split(','));
+        var headers = rows[0];
 
-        if (rows.length < 2) return [];
-
-        var headers = rows[0].map(function (h) { return h.trim(); });
-
-        return rows.slice(1).map(function (vals) {
-            var obj = {};
+        return rows.slice(1).map(function (r) {
+            var o = {};
             headers.forEach(function (h, i) {
-                obj[h] = (vals[i] || '').trim();
+                o[h.trim()] = (r[i] || '').trim();
             });
-            return obj;
+            return o;
         });
     }
 
     function group(rows) {
-        var map = {};
+        var m = {};
         rows.forEach(function (r) {
-            var cat = r['Категория'] || 'Без категории';
-            if (!map[cat]) map[cat] = [];
-            map[cat].push(r);
+            var c = r['Категория'] || 'Без категории';
+            if (!m[c]) m[c] = [];
+            m[c].push(r);
         });
-        return map;
+        return m;
     }
 
-    function loadSheet(cb) {
+    function load(cb) {
         var now = Date.now();
+        if (cache && now - last < CACHE_TIME) return cb(cache);
 
-        if (cache && now - lastLoad < CACHE_TIME) {
+        Lampa.Reguest.silent(sheetUrl(), function (res) {
+            cache = group(parseCSV(res));
+            last = now;
             cb(cache);
-            return;
-        }
-
-        Lampa.Reguest.silent(getSheetUrl(), function (res) {
-            try {
-                cache = group(parseCSV(res));
-                lastLoad = now;
-                cb(cache);
-            } catch (e) {
-                cb({});
-            }
         }, function () {
             cb({});
         });
     }
 
-    // ===== TMDB =====
-    function fetchTMDB(id, callback) {
-        if (metaCache[id]) {
-            callback(metaCache[id]);
-            return;
-        }
+    // ===== TMDB SAFE FETCH =====
+    function fetch(id, cb) {
 
-        var movieUrl = 'https://api.themoviedb.org/3/movie/' + id + '?api_key=' + TMDB_API_KEY + '&language=ru';
-        var tvUrl = 'https://api.themoviedb.org/3/tv/' + id + '?api_key=' + TMDB_API_KEY + '&language=ru';
+        var movie = 'https://api.themoviedb.org/3/movie/' + id + '?api_key=' + TMDB_API_KEY + '&language=ru';
+        var tv = 'https://api.themoviedb.org/3/tv/' + id + '?api_key=' + TMDB_API_KEY + '&language=ru';
 
-        Lampa.Reguest.silent(movieUrl, function (movie) {
+        Lampa.Reguest.silent(movie, function (m) {
 
-            if (movie && movie.id) {
-                metaCache[id] = {
+            if (m && m.id) {
+                return cb({
                     type: 'movie',
-                    data: movie
-                };
-                callback(metaCache[id]);
+                    data: m
+                });
             }
 
         }, function () {
 
-            Lampa.Reguest.silent(tvUrl, function (tv) {
+            Lampa.Reguest.silent(tv, function (t) {
 
-                if (tv && tv.id) {
-                    metaCache[id] = {
+                if (t && t.id) {
+                    return cb({
                         type: 'tv',
-                        data: tv
-                    };
-                    callback(metaCache[id]);
+                        data: t
+                    });
                 }
 
+                cb(null);
+
             }, function () {
-                callback(null);
+                cb(null);
             });
 
         });
     }
 
-    function toLampa(item, meta) {
-        var d = meta.data;
-
-        return {
-            id: d.id,
-            title: d.title || d.name,
-            original_title: d.original_title || d.original_name,
-            overview: d.overview,
-            poster_path: d.poster_path,
-            backdrop_path: d.backdrop_path,
-            vote_average: d.vote_average,
-            release_date: d.release_date,
-            first_air_date: d.first_air_date,
-            media_type: meta.type
-        };
-    }
-
+    // ===== PARALLEL BUILDER =====
     function build(rows, done) {
+
+        rows = rows.filter(r => r['TMDB ID'])
+                   .filter((v, i, a) =>
+                        a.findIndex(x => x['TMDB ID'] === v['TMDB ID']) === i
+                   );
+
         var results = [];
-        var i = 0;
+        var left = rows.length;
 
-        function next() {
-            if (i >= rows.length) return done(results);
+        if (!left) return done([]);
 
-            var id = rows[i]['TMDB ID'];
+        rows.forEach(function (row) {
 
-            if (!/^\d+$/.test(id)) {
-                i++;
-                return next();
-            }
+            fetch(row['TMDB ID'], function (meta) {
 
-            fetchTMDB(id, function (meta) {
-                if (meta) {
-                    results.push(toLampa(rows[i], meta));
+                if (meta && meta.data) {
+
+                    var d = meta.data;
+
+                    results.push({
+                        id: d.id,
+                        title: d.title || d.name,
+                        original_title: d.original_title || d.original_name,
+                        poster_path: d.poster_path,
+                        backdrop_path: d.backdrop_path,
+                        overview: d.overview,
+                        vote_average: d.vote_average,
+                        media_type: meta.type
+                    });
                 }
-                i++;
-                next();
-            });
-        }
 
-        next();
+                left--;
+
+                if (left === 0) {
+                    done(results);
+                }
+            });
+        });
     }
 
     function Api() {
         var self = this;
 
-        self.list = function (params, onComplete) {
-            loadSheet(function (data) {
-                var cat = params.url || Object.keys(data)[0];
-                if (!cat) return onComplete({ results: [] });
+        self.list = function (p, cb) {
+
+            load(function (data) {
+                var cat = p.url || Object.keys(data)[0];
+                if (!cat) return cb({ results: [] });
 
                 build(data[cat], function (items) {
-                    onComplete({
-                        results: items,
-                        total_results: items.length
-                    });
+                    cb({ results: items });
                 });
             });
         };
 
-        self.category = function (params, onSuccess) {
-            loadSheet(function (data) {
+        self.category = function (p, cb) {
+
+            load(function (data) {
+
                 var cats = Object.keys(data);
-                var res = [];
+                var out = [];
                 var i = 0;
 
                 function next() {
-                    if (i >= cats.length) return onSuccess({ results: res });
+                    if (i >= cats.length) return cb({ results: out });
 
-                    var cat = cats[i];
+                    var c = cats[i];
 
-                    build(data[cat].slice(0, 20), function (items) {
-                        res.push({
-                            title: cat,
-                            url: cat,
+                    build(data[c].slice(0, 20), function (items) {
+
+                        out.push({
+                            title: c,
+                            url: c,
                             source: PLUGIN_ID,
                             results: items,
-                            more: data[cat].length > 20
+                            more: data[c].length > 20
                         });
+
                         i++;
                         next();
                     });
@@ -193,12 +176,12 @@
             });
         };
 
-        self.full = function (params, onSuccess, onError) {
-            Lampa.Api.sources.tmdb.full(params, onSuccess, onError);
+        self.full = function (p, s, e) {
+            Lampa.Api.sources.tmdb.full(p, s, e);
         };
 
-        self.main = function (params, onComplete) {
-            onComplete([]);
+        self.main = function (p, cb) {
+            cb([]);
 
             setTimeout(function () {
                 Lampa.Activity.replace({
@@ -211,14 +194,13 @@
     }
 
     function start() {
-        if (window.gs_ultra) return;
-        window.gs_ultra = true;
+        if (window.gs_fixed) return;
+        window.gs_fixed = true;
 
         var api = new Api();
         Lampa.Api.sources[PLUGIN_ID] = api;
 
-        var item = $('<li class="menu__item selector">' +
-            '<div class="menu__text">' + PLUGIN_NAME + '</div></li>');
+        var item = $('<li class="menu__item selector"><div class="menu__text">' + PLUGIN_NAME + '</div></li>');
 
         $('.menu .menu__list').eq(0).append(item);
 
@@ -230,7 +212,7 @@
             });
         });
 
-        Lampa.Noty.show('ULTRA TMDB плагин активен 🚀');
+        Lampa.Noty.show('ULTRA FIX версия активна');
     }
 
     if (window.appready) start();
