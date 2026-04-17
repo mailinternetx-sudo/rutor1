@@ -1,16 +1,20 @@
 (function () {
     'use strict';
 
-    var SOURCE_NAME = 'My Collections';
+    var PLUGIN_NAME = 'GS Collections';
+    var PLUGIN_ID = 'gs_collections';
+
     var SHEET_ID = '1A-0etV0D1RfyNFKgniHlEUTjub1MesLQyaane-xNz6Y';
 
-    function getCsvUrl() {
+    function getUrl() {
         return 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv&gid=0';
     }
 
     var cache = null;
+    var cacheTime = 0;
+    var CACHE_TIME = 10 * 60 * 1000;
 
-    // ===== CSV ПАРСЕР =====
+    // ===== CSV ПАРСЕР (надёжный) =====
     function parseCSV(text) {
         var rows = [];
         var row = [];
@@ -54,25 +58,21 @@
         if (rows.length < 2) return [];
 
         var headers = rows[0].map(function (h) { return h.trim(); });
-        var result = [];
 
-        for (var i = 1; i < rows.length; i++) {
-            var values = rows[i];
-            if (values.length !== headers.length) continue;
+        return rows.slice(1).map(function (values) {
+            if (values.length !== headers.length) return null;
 
             var obj = {};
-            for (var j = 0; j < headers.length; j++) {
-                obj[headers[j]] = (values[j] || '').trim();
-            }
+            headers.forEach(function (h, i) {
+                obj[h] = (values[i] || '').trim();
+            });
 
-            result.push(obj);
-        }
-
-        return result;
+            return obj;
+        }).filter(Boolean);
     }
 
-    function cleanTitle(title) {
-        return (title || '')
+    function cleanTitle(t) {
+        return (t || '')
             .split(/[\[\(\|]/)[0]
             .replace(/\s+/g, ' ')
             .trim();
@@ -80,6 +80,7 @@
 
     function toItem(row) {
         var id = row['TMDB ID'];
+
         if (!/^\d+$/.test(id)) return null;
 
         var title = cleanTitle(row['Название']);
@@ -91,35 +92,53 @@
             id: parseInt(id, 10),
             title: title,
             original_title: title,
-            poster_path: row['Постер'] || '',
+            poster_path: normalizePoster(row['Постер']),
             release_date: /^\d{4}$/.test(year) ? year + '-01-01' : '',
             media_type: 'movie'
         };
     }
 
-    function group(rows) {
-        var g = {};
+    function normalizePoster(url) {
+        if (!url) return '';
+
+        url = url.trim();
+
+        // TMDB полный URL → path
+        var match = url.match(/\/t\/p\/([^?#]+)/);
+        if (match) return '/t/p/' + match[1];
+
+        return url;
+    }
+
+    function groupByCategory(rows) {
+        var map = {};
+
         rows.forEach(function (r) {
             var cat = r['Категория'] || 'Без категории';
-            if (!g[cat]) g[cat] = [];
-            g[cat].push(r);
+            if (!map[cat]) map[cat] = [];
+            map[cat].push(r);
         });
-        return g;
+
+        return map;
     }
 
     function load(callback) {
-        if (cache) {
+        var now = Date.now();
+
+        if (cache && (now - cacheTime < CACHE_TIME)) {
             callback(cache);
             return;
         }
 
-        Lampa.Reguest.silent(getCsvUrl(), function (res) {
+        Lampa.Reguest.silent(getUrl(), function (res) {
             try {
                 var rows = parseCSV(res);
-                cache = group(rows);
+                cache = groupByCategory(rows);
+                cacheTime = now;
+
                 callback(cache);
             } catch (e) {
-                console.log('CSV error', e);
+                console.log('GS parse error', e);
                 callback({});
             }
         }, function () {
@@ -133,9 +152,14 @@
         self.list = function (params, onComplete) {
             load(function (data) {
                 var keys = Object.keys(data);
-                var cat = params.url || keys[0];
+                var category = params.url || keys[0];
 
-                var items = (data[cat] || [])
+                if (!category) {
+                    onComplete({ results: [] });
+                    return;
+                }
+
+                var items = (data[category] || [])
                     .map(toItem)
                     .filter(Boolean);
 
@@ -152,8 +176,9 @@
                     return {
                         title: cat,
                         url: cat,
-                        source: SOURCE_NAME,
-                        results: data[cat].slice(0, 20).map(toItem).filter(Boolean)
+                        source: PLUGIN_ID,
+                        results: data[cat].slice(0, 20).map(toItem).filter(Boolean),
+                        more: data[cat].length > 20
                     };
                 });
 
@@ -171,37 +196,36 @@
             setTimeout(function () {
                 Lampa.Activity.replace({
                     component: 'category',
-                    source: SOURCE_NAME,
-                    title: SOURCE_NAME
+                    source: PLUGIN_ID,
+                    title: PLUGIN_NAME
                 });
             }, 0);
         };
     }
 
     function start() {
-        if (window.gs_plugin) return;
-        window.gs_plugin = true;
+        if (window.gs_plugin_v2) return;
+        window.gs_plugin_v2 = true;
 
         var api = new Api();
-
-        Lampa.Api.sources[SOURCE_NAME] = api;
+        Lampa.Api.sources[PLUGIN_ID] = api;
 
         if (!$('.menu__item[data-action="gs"]').length) {
             var item = $('<li class="menu__item selector" data-action="gs">' +
-                '<div class="menu__text">' + SOURCE_NAME + '</div></li>');
+                '<div class="menu__text">' + PLUGIN_NAME + '</div></li>');
 
             $('.menu .menu__list').eq(0).append(item);
 
             item.on('hover:enter', function () {
                 Lampa.Activity.push({
                     component: 'category',
-                    source: SOURCE_NAME,
-                    title: SOURCE_NAME
+                    source: PLUGIN_ID,
+                    title: PLUGIN_NAME
                 });
             });
         }
 
-        Lampa.Noty.show('Google Sheets подключен');
+        Lampa.Noty.show('GS Collections подключен');
     }
 
     if (window.appready) start();
